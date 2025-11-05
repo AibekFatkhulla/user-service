@@ -60,16 +60,16 @@ func main() {
 	}
 	log.Info("Successfully connected to the PostgreSQL database.")
 
-	// Создаем repository
+	// Create repository
 	userRepository := repository.NewPostgresUserRepository(db)
 
-	// Создаем service
+	// Create service
 	userService := service.NewUserService(userRepository)
 
-	// Создаем server
+	// Create server
 	srv := server.NewServer(userService, db)
 
-	// Настраиваем Echo
+	// Setup Echo
 	e := echo.New()
 
 	// Health check
@@ -87,8 +87,10 @@ func main() {
 
 	// Business logic endpoints
 	users.POST("/:id/coins", srv.AddCoins)
+	users.POST("/:id/coins/deduct", srv.DeductCoins)
 	users.POST("/:id/subscription/activate", srv.ActivateSubscription)
 	users.POST("/:id/subscription/renew", srv.RenewSubscription)
+	users.GET("/:id/access", srv.HasAccess)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -101,4 +103,3 @@ func main() {
 		log.WithField("error", err).Fatal("Echo server failed to start")
 	}
 }
-

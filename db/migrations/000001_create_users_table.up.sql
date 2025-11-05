@@ -1,10 +1,10 @@
 CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email TEXT NOT NULL UNIQUE,
     name TEXT NOT NULL,
     
-    coins_balance BIGINT DEFAULT 0,
-    total_coins_purchased BIGINT DEFAULT 0,
+    coins_balance BIGINT DEFAULT 0 CHECK (coins_balance >= 0),
+    total_coins_purchased BIGINT DEFAULT 0 CHECK (total_coins_purchased >= 0),
     
     is_trial BOOLEAN DEFAULT true,
     trial_ends_at TIMESTAMPTZ NOT NULL,

@@ -1,6 +1,27 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// User errors
+var (
+	ErrUserNotFound = errors.New("user not found")
+)
+
+// User status constants
+const (
+	StatusActive    = "active"
+	StatusInactive  = "inactive"
+	StatusSuspended = "suspended"
+	StatusDeleted   = "deleted"
+)
+
+// ValidStatuses returns list of valid user statuses
+func ValidStatuses() []string {
+	return []string{StatusActive, StatusInactive, StatusSuspended, StatusDeleted}
+}
 
 type User struct {
 	ID                  string     `json:"id"`
@@ -18,12 +39,12 @@ type User struct {
 }
 
 type CreateUserRequest struct {
-	ID    string `json:"id"`
 	Email string `json:"email"`
 	Name  string `json:"name"`
 }
 
 type UpdateUserRequest struct {
-	Email string `json:"email"`
-	Name  string `json:"name"`
+	Email  string  `json:"email"`
+	Name   string  `json:"name"`
+	Status *string `json:"status"` // optional
 }

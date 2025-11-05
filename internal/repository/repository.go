@@ -16,7 +16,13 @@ type UserRepository interface {
 	Create(ctx context.Context, user *domain.User) error
 	GetByID(ctx context.Context, id string) (*domain.User, error)
 	GetByEmail(ctx context.Context, email string) (*domain.User, error)
-	Update(ctx context.Context, user *domain.User) error
+	UpdateEmail(ctx context.Context, userID string, email string) error
+	UpdateName(ctx context.Context, userID string, name string) error
+	UpdateStatus(ctx context.Context, userID string, status string) error
+	AddCoinsAtomic(ctx context.Context, userID string, coins int64) error
+	DeductCoinsAtomic(ctx context.Context, userID string, coins int64) error
+	ActivateSubscriptionAtomic(ctx context.Context, userID string, isTrial bool, trialEndsAt *time.Time, subscriptionEndsAt *time.Time) error
+	RenewSubscriptionAtomic(ctx context.Context, userID string, subscriptionEndsAt *time.Time) error
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context, limit, offset int) ([]domain.User, error)
 }
@@ -105,13 +111,12 @@ func (r *PostgresUserRepository) GetByID(ctx context.Context, id string) (*domai
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("user not found: %w", err)
+			return nil, domain.ErrUserNotFound
 		}
 		log.WithError(err).WithField("user_id", id).Error("Failed to get user by ID")
 		return nil, fmt.Errorf("failed to get user by ID: %w", err)
 	}
 
-	// Преобразуем sql.NullTime в *time.Time
 	if trialEndsAt.Valid {
 		user.TrialEndsAt = &trialEndsAt.Time
 	}
@@ -156,13 +161,12 @@ func (r *PostgresUserRepository) GetByEmail(ctx context.Context, email string) (
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("user not found: %w", err)
+			return nil, domain.ErrUserNotFound
 		}
 		log.WithError(err).WithField("email", email).Error("Failed to get user by email")
 		return nil, fmt.Errorf("failed to get user by email: %w", err)
 	}
 
-	// Преобразуем sql.NullTime в *time.Time
 	if trialEndsAt.Valid {
 		user.TrialEndsAt = &trialEndsAt.Time
 	}
@@ -173,46 +177,21 @@ func (r *PostgresUserRepository) GetByEmail(ctx context.Context, email string) (
 	return &user, nil
 }
 
-func (r *PostgresUserRepository) Update(ctx context.Context, user *domain.User) error {
+func (r *PostgresUserRepository) UpdateEmail(ctx context.Context, userID string, email string) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	log.WithFields(log.Fields{
-		"user_id": user.ID,
-		"email":   user.Email,
-	}).Info("Updating user in database")
+		"user_id": userID,
+		"email":   email,
+	}).Info("Updating user email atomically")
 
-	query := `
-		UPDATE users SET
-			email = $1,
-			name = $2,
-			coins_balance = $3,
-			total_coins_purchased = $4,
-			is_trial = $5,
-			trial_ends_at = $6,
-			has_subscription = $7,
-			subscription_ends_at = $8,
-			status = $9,
-			updated_at = NOW()
-		WHERE id = $10
-	`
+	query := `UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2`
 
-	result, err := r.db.ExecContext(ctx, query,
-		user.Email,
-		user.Name,
-		user.CoinsBalance,
-		user.TotalCoinsPurchased,
-		user.IsTrial,
-		user.TrialEndsAt,
-		user.HasSubscription,
-		user.SubscriptionEndsAt,
-		user.Status,
-		user.ID,
-	)
-
+	result, err := r.db.ExecContext(ctx, query, email, userID)
 	if err != nil {
-		log.WithError(err).WithField("user_id", user.ID).Error("Failed to update user")
-		return fmt.Errorf("failed to update user: %w", err)
+		log.WithError(err).WithField("user_id", userID).Error("Failed to update user email")
+		return fmt.Errorf("failed to update email: %w", err)
 	}
 
 	rowsAffected, err := result.RowsAffected()
@@ -221,10 +200,238 @@ func (r *PostgresUserRepository) Update(ctx context.Context, user *domain.User) 
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("user not found")
+		return domain.ErrUserNotFound
 	}
 
-	log.WithField("user_id", user.ID).Info("User successfully updated")
+	log.WithField("user_id", userID).Info("User email successfully updated")
+	return nil
+}
+
+func (r *PostgresUserRepository) UpdateName(ctx context.Context, userID string, name string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	log.WithFields(log.Fields{
+		"user_id": userID,
+		"name":    name,
+	}).Info("Updating user name atomically")
+
+	query := `UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2`
+
+	result, err := r.db.ExecContext(ctx, query, name, userID)
+	if err != nil {
+		log.WithError(err).WithField("user_id", userID).Error("Failed to update user name")
+		return fmt.Errorf("failed to update name: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("could not determine rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return domain.ErrUserNotFound
+	}
+
+	log.WithField("user_id", userID).Info("User name successfully updated")
+	return nil
+}
+
+func (r *PostgresUserRepository) UpdateStatus(ctx context.Context, userID string, status string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	log.WithFields(log.Fields{
+		"user_id": userID,
+		"status":  status,
+	}).Info("Updating user status atomically")
+
+	query := `UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2`
+
+	result, err := r.db.ExecContext(ctx, query, status, userID)
+	if err != nil {
+		log.WithError(err).WithField("user_id", userID).Error("Failed to update user status")
+		return fmt.Errorf("failed to update status: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("could not determine rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return domain.ErrUserNotFound
+	}
+
+	log.WithField("user_id", userID).Info("User status successfully updated")
+	return nil
+}
+
+func (r *PostgresUserRepository) AddCoinsAtomic(ctx context.Context, userID string, coins int64) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if coins <= 0 {
+		return fmt.Errorf("coins must be greater than 0")
+	}
+
+	log.WithFields(log.Fields{
+		"user_id": userID,
+		"coins":   coins,
+	}).Info("Atomically adding coins to user")
+
+	query := `
+		UPDATE users SET
+			coins_balance = coins_balance + $1,
+			total_coins_purchased = total_coins_purchased + $1,
+			updated_at = NOW()
+		WHERE id = $2
+	`
+
+	result, err := r.db.ExecContext(ctx, query, coins, userID)
+	if err != nil {
+		log.WithError(err).WithField("user_id", userID).Error("Failed to add coins atomically")
+		return fmt.Errorf("failed to add coins: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("could not determine rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return domain.ErrUserNotFound
+	}
+
+	log.WithField("user_id", userID).Info("Coins successfully added atomically")
+	return nil
+}
+
+func (r *PostgresUserRepository) DeductCoinsAtomic(ctx context.Context, userID string, coins int64) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if coins <= 0 {
+		return fmt.Errorf("coins must be greater than 0")
+	}
+
+	log.WithFields(log.Fields{
+		"user_id": userID,
+		"coins":   coins,
+	}).Info("Atomically deducting coins from user")
+
+	query := `
+		UPDATE users SET
+			coins_balance = coins_balance - $1,
+			updated_at = NOW()
+		WHERE id = $2
+		  AND coins_balance >= $1
+	`
+
+	result, err := r.db.ExecContext(ctx, query, coins, userID)
+	if err != nil {
+		log.WithError(err).WithField("user_id", userID).Error("Failed to deduct coins atomically")
+		return fmt.Errorf("failed to deduct coins: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("could not determine rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		_, err := r.GetByID(ctx, userID)
+		if err != nil {
+			return domain.ErrUserNotFound
+		}
+		return fmt.Errorf("insufficient coins balance")
+	}
+
+	log.WithField("user_id", userID).Info("Coins successfully deducted atomically")
+	return nil
+}
+
+func (r *PostgresUserRepository) ActivateSubscriptionAtomic(ctx context.Context, userID string, isTrial bool, trialEndsAt *time.Time, subscriptionEndsAt *time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	log.WithFields(log.Fields{
+		"user_id":              userID,
+		"is_trial":             isTrial,
+		"subscription_ends_at": subscriptionEndsAt,
+	}).Info("Atomically activating subscription")
+
+	query := `
+		UPDATE users SET
+			is_trial = $1,
+			trial_ends_at = $2,
+			has_subscription = true,
+			subscription_ends_at = $3,
+			updated_at = NOW()
+		WHERE id = $4
+		  AND has_subscription = false
+	`
+
+	result, err := r.db.ExecContext(ctx, query, isTrial, trialEndsAt, subscriptionEndsAt, userID)
+	if err != nil {
+		log.WithError(err).WithField("user_id", userID).Error("Failed to activate subscription atomically")
+		return fmt.Errorf("failed to activate subscription: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("could not determine rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		_, err := r.GetByID(ctx, userID)
+		if err != nil {
+			return domain.ErrUserNotFound
+		}
+		return fmt.Errorf("subscription already active")
+	}
+
+	log.WithField("user_id", userID).Info("Subscription successfully activated atomically")
+	return nil
+}
+
+func (r *PostgresUserRepository) RenewSubscriptionAtomic(ctx context.Context, userID string, subscriptionEndsAt *time.Time) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	log.WithFields(log.Fields{
+		"user_id":              userID,
+		"subscription_ends_at": subscriptionEndsAt,
+	}).Info("Atomically renewing subscription")
+
+	query := `
+		UPDATE users SET
+			subscription_ends_at = $1,
+			updated_at = NOW()
+		WHERE id = $2
+		  AND has_subscription = true
+	`
+
+	result, err := r.db.ExecContext(ctx, query, subscriptionEndsAt, userID)
+	if err != nil {
+		log.WithError(err).WithField("user_id", userID).Error("Failed to renew subscription atomically")
+		return fmt.Errorf("failed to renew subscription: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("could not determine rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		_, err := r.GetByID(ctx, userID)
+		if err != nil {
+			return domain.ErrUserNotFound
+		}
+		return fmt.Errorf("user does not have an active subscription")
+	}
+
+	log.WithField("user_id", userID).Info("Subscription successfully renewed atomically")
 	return nil
 }
 
@@ -302,7 +509,6 @@ func (r *PostgresUserRepository) List(ctx context.Context, limit, offset int) ([
 			return nil, fmt.Errorf("failed to scan user row: %w", err)
 		}
 
-		// Преобразуем sql.NullTime в *time.Time
 		if trialEndsAt.Valid {
 			user.TrialEndsAt = &trialEndsAt.Time
 		}
