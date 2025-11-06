@@ -305,6 +305,11 @@ func (s *userService) ActivateSubscription(ctx context.Context, userID string, d
 		return domain.ErrInvalidSubscriptionDuration
 	}
 
+	maxDuration := time.Duration(domain.MaxSubscriptionDurationHours) * time.Hour
+	if duration > maxDuration {
+		return domain.ErrSubscriptionDurationTooLong
+	}
+
 	user, err := s.userRepository.GetByID(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("user not found: %w", err)
@@ -344,6 +349,11 @@ func (s *userService) RenewSubscription(ctx context.Context, userID string, dura
 	}
 	if duration <= 0 {
 		return domain.ErrInvalidSubscriptionDuration
+	}
+
+	maxDuration := time.Duration(domain.MaxSubscriptionDurationHours) * time.Hour
+	if duration > maxDuration {
+		return domain.ErrSubscriptionDurationTooLong
 	}
 
 	user, err := s.userRepository.GetByID(ctx, userID)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -80,6 +81,8 @@ func handleError(err error) (int, string) {
 		return http.StatusBadRequest, "list limit is too large"
 	case errors.Is(err, domain.ErrListOffsetTooLarge):
 		return http.StatusBadRequest, "list offset is too large"
+	case errors.Is(err, domain.ErrSubscriptionDurationTooLong):
+		return http.StatusBadRequest, "subscription duration is too long"
 	default:
 		return http.StatusInternalServerError, "internal server error"
 	}
@@ -371,6 +374,12 @@ func (s *server) ActivateSubscription(c echo.Context) error {
 		})
 	}
 
+	if req.DurationHours > domain.MaxSubscriptionDurationHours {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("duration_hours must not exceed %d hours", domain.MaxSubscriptionDurationHours),
+		})
+	}
+
 	duration := time.Duration(req.DurationHours) * time.Hour
 
 	ctx := c.Request().Context()
@@ -405,6 +414,12 @@ func (s *server) RenewSubscription(c echo.Context) error {
 	if req.DurationHours <= 0 {
 		return c.JSON(http.StatusBadRequest, map[string]string{
 			"error": "duration_hours must be greater than 0",
+		})
+	}
+
+	if req.DurationHours > domain.MaxSubscriptionDurationHours {
+		return c.JSON(http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("duration_hours must not exceed %d hours", domain.MaxSubscriptionDurationHours),
 		})
 	}
 

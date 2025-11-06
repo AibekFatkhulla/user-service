@@ -25,6 +25,7 @@ var (
 	ErrCoinsAmountTooLarge         = errors.New("coins amount is too large")
 	ErrListLimitTooLarge           = errors.New("list limit is too large")
 	ErrListOffsetTooLarge          = errors.New("list offset is too large")
+	ErrSubscriptionDurationTooLong = errors.New("subscription duration is too long")
 )
 
 // User status constants
@@ -43,6 +44,7 @@ const (
 	MaxListLimit       = 100
 	MaxListOffset      = 10_000_000      // 10 million
 	MaxRequestBodySize = 1 * 1024 * 1024 // 1 MB
+	MaxSubscriptionDurationHours = 87600 // 10 years (365 * 24 * 10)
 )
 
 // ValidStatuses returns list of valid user statuses
