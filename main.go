@@ -19,6 +19,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 )
 
 func main() {
@@ -71,6 +72,9 @@ func main() {
 
 	// Setup Echo
 	e := echo.New()
+
+	// Add BodyLimit middleware to prevent large request bodies (1 MB)
+	e.Use(middleware.BodyLimit("1M"))
 
 	// Health check
 	e.GET("/health", srv.HealthCheck)

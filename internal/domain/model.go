@@ -7,7 +7,24 @@ import (
 
 // User errors
 var (
-	ErrUserNotFound = errors.New("user not found")
+	ErrUserNotFound                = errors.New("user not found")
+	ErrInsufficientCoinsBalance    = errors.New("insufficient coins balance")
+	ErrSubscriptionAlreadyActive   = errors.New("subscription already active")
+	ErrNoActiveSubscription        = errors.New("user does not have an active subscription")
+	ErrInvalidCoinsAmount          = errors.New("coins must be greater than 0")
+	ErrInvalidEmailFormat          = errors.New("invalid email format")
+	ErrEmailAlreadyExists          = errors.New("user with this email already exists")
+	ErrInvalidStatus               = errors.New("invalid status")
+	ErrInvalidSubscriptionDuration = errors.New("subscription duration must be greater than 0")
+	ErrEmailRequired               = errors.New("email is required")
+	ErrNameRequired                = errors.New("name is required")
+	ErrUserIDRequired              = errors.New("user ID is required")
+	ErrEmailTooLong                = errors.New("email is too long")
+	ErrNameTooLong                 = errors.New("name is too long")
+	ErrInvalidUUID                 = errors.New("invalid user ID format")
+	ErrCoinsAmountTooLarge         = errors.New("coins amount is too large")
+	ErrListLimitTooLarge           = errors.New("list limit is too large")
+	ErrListOffsetTooLarge          = errors.New("list offset is too large")
 )
 
 // User status constants
@@ -16,6 +33,16 @@ const (
 	StatusInactive  = "inactive"
 	StatusSuspended = "suspended"
 	StatusDeleted   = "deleted"
+)
+
+// Validation constants
+const (
+	MaxEmailLength     = 255
+	MaxNameLength      = 100
+	MaxCoinsAmount     = 1_000_000_000 // 1 billion
+	MaxListLimit       = 100
+	MaxListOffset      = 10_000_000      // 10 million
+	MaxRequestBodySize = 1 * 1024 * 1024 // 1 MB
 )
 
 // ValidStatuses returns list of valid user statuses
@@ -47,4 +74,12 @@ type UpdateUserRequest struct {
 	Email  string  `json:"email"`
 	Name   string  `json:"name"`
 	Status *string `json:"status"` // optional
+}
+
+// UpdateUserFields represents fields to update in repository
+// nil pointer means "don't update this field"
+type UpdateUserFields struct {
+	Email  *string
+	Name   *string
+	Status *string
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 	"user-service/internal/domain"
 
@@ -12,30 +13,15 @@ import (
 	_ "github.com/lib/pq"
 )
 
-type UserRepository interface {
-	Create(ctx context.Context, user *domain.User) error
-	GetByID(ctx context.Context, id string) (*domain.User, error)
-	GetByEmail(ctx context.Context, email string) (*domain.User, error)
-	UpdateEmail(ctx context.Context, userID string, email string) error
-	UpdateName(ctx context.Context, userID string, name string) error
-	UpdateStatus(ctx context.Context, userID string, status string) error
-	AddCoinsAtomic(ctx context.Context, userID string, coins int64) error
-	DeductCoinsAtomic(ctx context.Context, userID string, coins int64) error
-	ActivateSubscriptionAtomic(ctx context.Context, userID string, isTrial bool, trialEndsAt *time.Time, subscriptionEndsAt *time.Time) error
-	RenewSubscriptionAtomic(ctx context.Context, userID string, subscriptionEndsAt *time.Time) error
-	Delete(ctx context.Context, id string) error
-	List(ctx context.Context, limit, offset int) ([]domain.User, error)
-}
-
-type PostgresUserRepository struct {
+type postgresUserRepository struct {
 	db *sql.DB
 }
 
-func NewPostgresUserRepository(db *sql.DB) *PostgresUserRepository {
-	return &PostgresUserRepository{db: db}
+func NewPostgresUserRepository(db *sql.DB) *postgresUserRepository {
+	return &postgresUserRepository{db: db}
 }
 
-func (r *PostgresUserRepository) Create(ctx context.Context, user *domain.User) error {
+func (r *postgresUserRepository) Create(ctx context.Context, user *domain.User) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -77,7 +63,7 @@ func (r *PostgresUserRepository) Create(ctx context.Context, user *domain.User) 
 	return nil
 }
 
-func (r *PostgresUserRepository) GetByID(ctx context.Context, id string) (*domain.User, error) {
+func (r *postgresUserRepository) GetByID(ctx context.Context, id string) (*domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -127,7 +113,7 @@ func (r *PostgresUserRepository) GetByID(ctx context.Context, id string) (*domai
 	return &user, nil
 }
 
-func (r *PostgresUserRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
+func (r *postgresUserRepository) GetByEmail(ctx context.Context, email string) (*domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -177,21 +163,59 @@ func (r *PostgresUserRepository) GetByEmail(ctx context.Context, email string) (
 	return &user, nil
 }
 
-func (r *PostgresUserRepository) UpdateEmail(ctx context.Context, userID string, email string) error {
+func (r *postgresUserRepository) Update(ctx context.Context, userID string, fields *domain.UpdateUserFields) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	// Build dynamic SQL query based on provided fields
+	var setParts []string
+	var args []interface{}
+	argIndex := 1
+
+	if fields.Email != nil {
+		setParts = append(setParts, fmt.Sprintf("email = $%d", argIndex))
+		args = append(args, *fields.Email)
+		argIndex++
+	}
+
+	if fields.Name != nil {
+		setParts = append(setParts, fmt.Sprintf("name = $%d", argIndex))
+		args = append(args, *fields.Name)
+		argIndex++
+	}
+
+	if fields.Status != nil {
+		setParts = append(setParts, fmt.Sprintf("status = $%d", argIndex))
+		args = append(args, *fields.Status)
+		argIndex++
+	}
+
+	// If no fields to update, return early
+	if len(setParts) == 0 {
+		log.WithField("user_id", userID).Info("No fields to update, skipping")
+		return nil
+	}
+
+	// Always update updated_at
+	setParts = append(setParts, "updated_at = NOW()")
+
+	// Build final query
+	query := fmt.Sprintf(
+		"UPDATE users SET %s WHERE id = $%d",
+		strings.Join(setParts, ", "),
+		argIndex,
+	)
+	args = append(args, userID)
+
 	log.WithFields(log.Fields{
 		"user_id": userID,
-		"email":   email,
-	}).Info("Updating user email atomically")
+		"fields":  setParts,
+	}).Info("Updating user with dynamic SQL in single transaction")
 
-	query := `UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2`
-
-	result, err := r.db.ExecContext(ctx, query, email, userID)
+	result, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		log.WithError(err).WithField("user_id", userID).Error("Failed to update user email")
-		return fmt.Errorf("failed to update email: %w", err)
+		log.WithError(err).WithField("user_id", userID).Error("Failed to update user")
+		return fmt.Errorf("failed to update user: %w", err)
 	}
 
 	rowsAffected, err := result.RowsAffected()
@@ -203,76 +227,16 @@ func (r *PostgresUserRepository) UpdateEmail(ctx context.Context, userID string,
 		return domain.ErrUserNotFound
 	}
 
-	log.WithField("user_id", userID).Info("User email successfully updated")
+	log.WithField("user_id", userID).Info("User successfully updated in single transaction")
 	return nil
 }
 
-func (r *PostgresUserRepository) UpdateName(ctx context.Context, userID string, name string) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	log.WithFields(log.Fields{
-		"user_id": userID,
-		"name":    name,
-	}).Info("Updating user name atomically")
-
-	query := `UPDATE users SET name = $1, updated_at = NOW() WHERE id = $2`
-
-	result, err := r.db.ExecContext(ctx, query, name, userID)
-	if err != nil {
-		log.WithError(err).WithField("user_id", userID).Error("Failed to update user name")
-		return fmt.Errorf("failed to update name: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("could not determine rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return domain.ErrUserNotFound
-	}
-
-	log.WithField("user_id", userID).Info("User name successfully updated")
-	return nil
-}
-
-func (r *PostgresUserRepository) UpdateStatus(ctx context.Context, userID string, status string) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	log.WithFields(log.Fields{
-		"user_id": userID,
-		"status":  status,
-	}).Info("Updating user status atomically")
-
-	query := `UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2`
-
-	result, err := r.db.ExecContext(ctx, query, status, userID)
-	if err != nil {
-		log.WithError(err).WithField("user_id", userID).Error("Failed to update user status")
-		return fmt.Errorf("failed to update status: %w", err)
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("could not determine rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
-		return domain.ErrUserNotFound
-	}
-
-	log.WithField("user_id", userID).Info("User status successfully updated")
-	return nil
-}
-
-func (r *PostgresUserRepository) AddCoinsAtomic(ctx context.Context, userID string, coins int64) error {
+func (r *postgresUserRepository) AddCoinsAtomic(ctx context.Context, userID string, coins int64) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	if coins <= 0 {
-		return fmt.Errorf("coins must be greater than 0")
+		return domain.ErrInvalidCoinsAmount
 	}
 
 	log.WithFields(log.Fields{
@@ -307,12 +271,12 @@ func (r *PostgresUserRepository) AddCoinsAtomic(ctx context.Context, userID stri
 	return nil
 }
 
-func (r *PostgresUserRepository) DeductCoinsAtomic(ctx context.Context, userID string, coins int64) error {
+func (r *postgresUserRepository) DeductCoinsAtomic(ctx context.Context, userID string, coins int64) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	if coins <= 0 {
-		return fmt.Errorf("coins must be greater than 0")
+		return domain.ErrInvalidCoinsAmount
 	}
 
 	log.WithFields(log.Fields{
@@ -344,14 +308,14 @@ func (r *PostgresUserRepository) DeductCoinsAtomic(ctx context.Context, userID s
 		if err != nil {
 			return domain.ErrUserNotFound
 		}
-		return fmt.Errorf("insufficient coins balance")
+		return domain.ErrInsufficientCoinsBalance
 	}
 
 	log.WithField("user_id", userID).Info("Coins successfully deducted atomically")
 	return nil
 }
 
-func (r *PostgresUserRepository) ActivateSubscriptionAtomic(ctx context.Context, userID string, isTrial bool, trialEndsAt *time.Time, subscriptionEndsAt *time.Time) error {
+func (r *postgresUserRepository) ActivateSubscriptionAtomic(ctx context.Context, userID string, isTrial bool, trialEndsAt *time.Time, subscriptionEndsAt *time.Time) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -388,14 +352,14 @@ func (r *PostgresUserRepository) ActivateSubscriptionAtomic(ctx context.Context,
 		if err != nil {
 			return domain.ErrUserNotFound
 		}
-		return fmt.Errorf("subscription already active")
+		return domain.ErrSubscriptionAlreadyActive
 	}
 
 	log.WithField("user_id", userID).Info("Subscription successfully activated atomically")
 	return nil
 }
 
-func (r *PostgresUserRepository) RenewSubscriptionAtomic(ctx context.Context, userID string, subscriptionEndsAt *time.Time) error {
+func (r *postgresUserRepository) RenewSubscriptionAtomic(ctx context.Context, userID string, subscriptionEndsAt *time.Time) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -428,14 +392,14 @@ func (r *PostgresUserRepository) RenewSubscriptionAtomic(ctx context.Context, us
 		if err != nil {
 			return domain.ErrUserNotFound
 		}
-		return fmt.Errorf("user does not have an active subscription")
+		return domain.ErrNoActiveSubscription
 	}
 
 	log.WithField("user_id", userID).Info("Subscription successfully renewed atomically")
 	return nil
 }
 
-func (r *PostgresUserRepository) Delete(ctx context.Context, id string) error {
+func (r *postgresUserRepository) Delete(ctx context.Context, id string) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -455,14 +419,14 @@ func (r *PostgresUserRepository) Delete(ctx context.Context, id string) error {
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("user not found")
+		return domain.ErrUserNotFound
 	}
 
 	log.WithField("user_id", id).Info("User successfully deleted")
 	return nil
 }
 
-func (r *PostgresUserRepository) List(ctx context.Context, limit, offset int) ([]domain.User, error) {
+func (r *postgresUserRepository) List(ctx context.Context, limit, offset int) ([]domain.User, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 

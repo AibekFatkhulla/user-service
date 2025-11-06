@@ -2,36 +2,36 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
 	"user-service/internal/domain"
-	"user-service/internal/repository"
 
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 )
 
-type UserServiceInterface interface {
-	CreateUser(ctx context.Context, req domain.CreateUserRequest) (*domain.User, error)
-	GetUser(ctx context.Context, id string) (*domain.User, error)
-	GetUserByEmail(ctx context.Context, email string) (*domain.User, error)
-	UpdateUser(ctx context.Context, id string, req domain.UpdateUserRequest) (*domain.User, error)
-	DeleteUser(ctx context.Context, id string) error
-	ListUsers(ctx context.Context, limit, offset int) ([]domain.User, error)
-	AddCoins(ctx context.Context, userID string, coins int64) error
-	DeductCoins(ctx context.Context, userID string, coins int64) error
-	ActivateSubscription(ctx context.Context, userID string, duration time.Duration) error
-	RenewSubscription(ctx context.Context, userID string, duration time.Duration) error
-	HasAccessByUser(user *domain.User) bool
+// UserRepository defines the interface for user data access
+type UserRepository interface {
+	Create(ctx context.Context, user *domain.User) error
+	GetByID(ctx context.Context, id string) (*domain.User, error)
+	GetByEmail(ctx context.Context, email string) (*domain.User, error)
+	Update(ctx context.Context, userID string, fields *domain.UpdateUserFields) error
+	AddCoinsAtomic(ctx context.Context, userID string, coins int64) error
+	DeductCoinsAtomic(ctx context.Context, userID string, coins int64) error
+	ActivateSubscriptionAtomic(ctx context.Context, userID string, isTrial bool, trialEndsAt *time.Time, subscriptionEndsAt *time.Time) error
+	RenewSubscriptionAtomic(ctx context.Context, userID string, subscriptionEndsAt *time.Time) error
+	Delete(ctx context.Context, id string) error
+	List(ctx context.Context, limit, offset int) ([]domain.User, error)
 }
 
-type UserService struct {
-	userRepository repository.UserRepository
+type userService struct {
+	userRepository UserRepository
 }
 
-func NewUserService(userRepository repository.UserRepository) *UserService {
-	return &UserService{userRepository: userRepository}
+func NewUserService(userRepository UserRepository) *userService {
+	return &userService{userRepository: userRepository}
 }
 
 // ValidateStatus validates user status
@@ -42,25 +42,31 @@ func ValidateStatus(status string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("invalid status: %s. Valid statuses: %v", status, validStatuses)
+	return domain.ErrInvalidStatus
 }
 
-func (s *UserService) CreateUser(ctx context.Context, req domain.CreateUserRequest) (*domain.User, error) {
+func (s *userService) CreateUser(ctx context.Context, req domain.CreateUserRequest) (*domain.User, error) {
 	if req.Email == "" {
-		return nil, fmt.Errorf("email is required")
+		return nil, domain.ErrEmailRequired
+	}
+	if len(req.Email) > domain.MaxEmailLength {
+		return nil, domain.ErrEmailTooLong
 	}
 	if req.Name == "" {
-		return nil, fmt.Errorf("name is required")
+		return nil, domain.ErrNameRequired
+	}
+	if len(req.Name) > domain.MaxNameLength {
+		return nil, domain.ErrNameTooLong
 	}
 
 	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 	if !emailRegex.MatchString(req.Email) {
-		return nil, fmt.Errorf("invalid email format")
+		return nil, domain.ErrInvalidEmailFormat
 	}
 
 	existingUserByEmail, err := s.userRepository.GetByEmail(ctx, req.Email)
 	if err == nil && existingUserByEmail != nil {
-		return nil, fmt.Errorf("user with email %s already exists", req.Email)
+		return nil, domain.ErrEmailAlreadyExists
 	}
 
 	userID := uuid.New().String()
@@ -93,9 +99,12 @@ func (s *UserService) CreateUser(ctx context.Context, req domain.CreateUserReque
 	return user, nil
 }
 
-func (s *UserService) GetUser(ctx context.Context, id string) (*domain.User, error) {
+func (s *userService) GetUser(ctx context.Context, id string) (*domain.User, error) {
 	if id == "" {
-		return nil, fmt.Errorf("user ID is required")
+		return nil, domain.ErrUserIDRequired
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, domain.ErrInvalidUUID
 	}
 
 	user, err := s.userRepository.GetByID(ctx, id)
@@ -106,9 +115,9 @@ func (s *UserService) GetUser(ctx context.Context, id string) (*domain.User, err
 	return user, nil
 }
 
-func (s *UserService) GetUserByEmail(ctx context.Context, email string) (*domain.User, error) {
+func (s *userService) GetUserByEmail(ctx context.Context, email string) (*domain.User, error) {
 	if email == "" {
-		return nil, fmt.Errorf("email is required")
+		return nil, domain.ErrEmailRequired
 	}
 
 	user, err := s.userRepository.GetByEmail(ctx, email)
@@ -119,9 +128,12 @@ func (s *UserService) GetUserByEmail(ctx context.Context, email string) (*domain
 	return user, nil
 }
 
-func (s *UserService) UpdateUser(ctx context.Context, id string, req domain.UpdateUserRequest) (*domain.User, error) {
+func (s *userService) UpdateUser(ctx context.Context, id string, req domain.UpdateUserRequest) (*domain.User, error) {
 	if id == "" {
-		return nil, fmt.Errorf("user ID is required")
+		return nil, domain.ErrUserIDRequired
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return nil, domain.ErrInvalidUUID
 	}
 
 	user, err := s.userRepository.GetByID(ctx, id)
@@ -129,50 +141,66 @@ func (s *UserService) UpdateUser(ctx context.Context, id string, req domain.Upda
 		return nil, fmt.Errorf("user not found: %w", err)
 	}
 
-	if req.Email != "" {
+	// Build update fields structure - only include changed fields
+	updateFields := &domain.UpdateUserFields{}
+
+	// Validate and prepare email update
+	if req.Email != "" && req.Email != user.Email {
+		if len(req.Email) > domain.MaxEmailLength {
+			return nil, domain.ErrEmailTooLong
+		}
 		emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
 		if !emailRegex.MatchString(req.Email) {
-			return nil, fmt.Errorf("invalid email format")
+			return nil, domain.ErrInvalidEmailFormat
 		}
-		if req.Email != user.Email {
-			existingUser, err := s.userRepository.GetByEmail(ctx, req.Email)
-			if err == nil && existingUser != nil {
-				return nil, fmt.Errorf("user with email %s already exists", req.Email)
-			}
+		existingUser, err := s.userRepository.GetByEmail(ctx, req.Email)
+		if err == nil && existingUser != nil {
+			return nil, domain.ErrEmailAlreadyExists
 		}
-		if err := s.userRepository.UpdateEmail(ctx, id, req.Email); err != nil {
-			log.WithError(err).WithField("user_id", id).Error("Failed to update user email")
-			return nil, fmt.Errorf("failed to update email: %w", err)
-		}
+		updateFields.Email = &req.Email
 		user.Email = req.Email
 	}
 
-	if req.Name != "" {
-		if err := s.userRepository.UpdateName(ctx, id, req.Name); err != nil {
-			log.WithError(err).WithField("user_id", id).Error("Failed to update user name")
-			return nil, fmt.Errorf("failed to update name: %w", err)
+	// Prepare name update
+	if req.Name != "" && req.Name != user.Name {
+		if len(req.Name) > domain.MaxNameLength {
+			return nil, domain.ErrNameTooLong
 		}
+		updateFields.Name = &req.Name
 		user.Name = req.Name
 	}
 
-	if req.Status != nil {
+	// Validate and prepare status update
+	if req.Status != nil && *req.Status != user.Status {
 		if err := ValidateStatus(*req.Status); err != nil {
 			return nil, err
 		}
-		if err := s.userRepository.UpdateStatus(ctx, id, *req.Status); err != nil {
-			log.WithError(err).WithField("user_id", id).Error("Failed to update user status")
-			return nil, fmt.Errorf("failed to update status: %w", err)
-		}
+		updateFields.Status = req.Status
 		user.Status = *req.Status
+	}
+
+	// If no fields changed, return current user
+	if updateFields.Email == nil && updateFields.Name == nil && updateFields.Status == nil {
+		log.WithField("user_id", id).Info("No fields changed, skipping update")
+		return user, nil
+	}
+
+	// Update user in repository (single transaction, only changed fields)
+	if err := s.userRepository.Update(ctx, id, updateFields); err != nil {
+		log.WithError(err).WithField("user_id", id).Error("Failed to update user")
+		return nil, fmt.Errorf("failed to update user: %w", err)
 	}
 
 	log.WithField("user_id", id).Info("User successfully updated")
 	return user, nil
 }
 
-func (s *UserService) DeleteUser(ctx context.Context, id string) error {
+func (s *userService) DeleteUser(ctx context.Context, id string) error {
 	if id == "" {
-		return fmt.Errorf("user ID is required")
+		return domain.ErrUserIDRequired
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return domain.ErrInvalidUUID
 	}
 
 	if err := s.userRepository.Delete(ctx, id); err != nil {
@@ -184,12 +212,18 @@ func (s *UserService) DeleteUser(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *UserService) ListUsers(ctx context.Context, limit, offset int) ([]domain.User, error) {
+func (s *userService) ListUsers(ctx context.Context, limit, offset int) ([]domain.User, error) {
 	if limit <= 0 {
 		limit = 10
 	}
+	if limit > domain.MaxListLimit {
+		return nil, domain.ErrListLimitTooLarge
+	}
 	if offset < 0 {
 		offset = 0
+	}
+	if offset > domain.MaxListOffset {
+		return nil, domain.ErrListOffsetTooLarge
 	}
 
 	users, err := s.userRepository.List(ctx, limit, offset)
@@ -200,12 +234,18 @@ func (s *UserService) ListUsers(ctx context.Context, limit, offset int) ([]domai
 	return users, nil
 }
 
-func (s *UserService) AddCoins(ctx context.Context, userID string, coins int64) error {
+func (s *userService) AddCoins(ctx context.Context, userID string, coins int64) error {
 	if userID == "" {
-		return fmt.Errorf("user ID is required")
+		return domain.ErrUserIDRequired
+	}
+	if _, err := uuid.Parse(userID); err != nil {
+		return domain.ErrInvalidUUID
 	}
 	if coins <= 0 {
-		return fmt.Errorf("coins must be greater than 0")
+		return domain.ErrInvalidCoinsAmount
+	}
+	if coins > domain.MaxCoinsAmount {
+		return domain.ErrCoinsAmountTooLarge
 	}
 
 	if err := s.userRepository.AddCoinsAtomic(ctx, userID, coins); err != nil {
@@ -224,12 +264,18 @@ func (s *UserService) AddCoins(ctx context.Context, userID string, coins int64) 
 	return nil
 }
 
-func (s *UserService) DeductCoins(ctx context.Context, userID string, coins int64) error {
+func (s *userService) DeductCoins(ctx context.Context, userID string, coins int64) error {
 	if userID == "" {
-		return fmt.Errorf("user ID is required")
+		return domain.ErrUserIDRequired
+	}
+	if _, err := uuid.Parse(userID); err != nil {
+		return domain.ErrInvalidUUID
 	}
 	if coins <= 0 {
-		return fmt.Errorf("coins must be greater than 0")
+		return domain.ErrInvalidCoinsAmount
+	}
+	if coins > domain.MaxCoinsAmount {
+		return domain.ErrCoinsAmountTooLarge
 	}
 
 	if err := s.userRepository.DeductCoinsAtomic(ctx, userID, coins); err != nil {
@@ -248,12 +294,15 @@ func (s *UserService) DeductCoins(ctx context.Context, userID string, coins int6
 	return nil
 }
 
-func (s *UserService) ActivateSubscription(ctx context.Context, userID string, duration time.Duration) error {
+func (s *userService) ActivateSubscription(ctx context.Context, userID string, duration time.Duration) error {
 	if userID == "" {
-		return fmt.Errorf("user ID is required")
+		return domain.ErrUserIDRequired
+	}
+	if _, err := uuid.Parse(userID); err != nil {
+		return domain.ErrInvalidUUID
 	}
 	if duration <= 0 {
-		return fmt.Errorf("subscription duration must be greater than 0")
+		return domain.ErrInvalidSubscriptionDuration
 	}
 
 	user, err := s.userRepository.GetByID(ctx, userID)
@@ -270,10 +319,10 @@ func (s *UserService) ActivateSubscription(ctx context.Context, userID string, d
 	}
 
 	if err := s.userRepository.ActivateSubscriptionAtomic(ctx, userID, isTrial, user.TrialEndsAt, &subscriptionEndsAt); err != nil {
-		log.WithError(err).WithField("user_id", userID).Error("Failed to activate subscription")
-		if err.Error() == "subscription already active" {
-			return fmt.Errorf("subscription already active")
+		if errors.Is(err, domain.ErrSubscriptionAlreadyActive) {
+			return domain.ErrSubscriptionAlreadyActive
 		}
+		log.WithError(err).WithField("user_id", userID).Error("Failed to activate subscription")
 		return fmt.Errorf("failed to activate subscription: %w", err)
 	}
 
@@ -286,12 +335,15 @@ func (s *UserService) ActivateSubscription(ctx context.Context, userID string, d
 	return nil
 }
 
-func (s *UserService) RenewSubscription(ctx context.Context, userID string, duration time.Duration) error {
+func (s *userService) RenewSubscription(ctx context.Context, userID string, duration time.Duration) error {
 	if userID == "" {
-		return fmt.Errorf("user ID is required")
+		return domain.ErrUserIDRequired
+	}
+	if _, err := uuid.Parse(userID); err != nil {
+		return domain.ErrInvalidUUID
 	}
 	if duration <= 0 {
-		return fmt.Errorf("subscription duration must be greater than 0")
+		return domain.ErrInvalidSubscriptionDuration
 	}
 
 	user, err := s.userRepository.GetByID(ctx, userID)
@@ -329,7 +381,7 @@ func (s *UserService) RenewSubscription(ctx context.Context, userID string, dura
 // Access is granted if:
 // 1. status == "active"
 // 2. AND (has active subscription OR trial is active)
-func (s *UserService) HasAccessByUser(user *domain.User) bool {
+func (s *userService) HasAccessByUser(user *domain.User) bool {
 	if user == nil {
 		return false
 	}

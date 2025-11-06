@@ -1,32 +1,91 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
 	"time"
 	"user-service/internal/domain"
-	"user-service/internal/service"
 
 	log "github.com/sirupsen/logrus"
 
 	"github.com/labstack/echo/v4"
 )
 
-type Server struct {
-	userService service.UserServiceInterface
+// UserService defines the interface for user business logic
+type UserService interface {
+	CreateUser(ctx context.Context, req domain.CreateUserRequest) (*domain.User, error)
+	GetUser(ctx context.Context, id string) (*domain.User, error)
+	GetUserByEmail(ctx context.Context, email string) (*domain.User, error)
+	UpdateUser(ctx context.Context, id string, req domain.UpdateUserRequest) (*domain.User, error)
+	DeleteUser(ctx context.Context, id string) error
+	ListUsers(ctx context.Context, limit, offset int) ([]domain.User, error)
+	AddCoins(ctx context.Context, userID string, coins int64) error
+	DeductCoins(ctx context.Context, userID string, coins int64) error
+	ActivateSubscription(ctx context.Context, userID string, duration time.Duration) error
+	RenewSubscription(ctx context.Context, userID string, duration time.Duration) error
+	HasAccessByUser(user *domain.User) bool
+}
+
+type server struct {
+	userService UserService
 	db          *sql.DB
 }
 
-func NewServer(userService service.UserServiceInterface, db *sql.DB) *Server {
-	return &Server{
+func NewServer(userService UserService, db *sql.DB) *server {
+	return &server{
 		userService: userService,
 		db:          db,
 	}
 }
 
-func (s *Server) HealthCheck(c echo.Context) error {
+// handleError processes domain errors and returns appropriate HTTP response
+func handleError(err error) (int, string) {
+	switch {
+	case errors.Is(err, domain.ErrUserNotFound):
+		return http.StatusNotFound, "user not found"
+	case errors.Is(err, domain.ErrEmailAlreadyExists):
+		return http.StatusConflict, "user with this email already exists"
+	case errors.Is(err, domain.ErrEmailRequired):
+		return http.StatusBadRequest, "email is required"
+	case errors.Is(err, domain.ErrNameRequired):
+		return http.StatusBadRequest, "name is required"
+	case errors.Is(err, domain.ErrUserIDRequired):
+		return http.StatusBadRequest, "user ID is required"
+	case errors.Is(err, domain.ErrInvalidEmailFormat):
+		return http.StatusBadRequest, "invalid email format"
+	case errors.Is(err, domain.ErrInvalidStatus):
+		return http.StatusBadRequest, "invalid status"
+	case errors.Is(err, domain.ErrInvalidCoinsAmount):
+		return http.StatusBadRequest, "coins must be greater than 0"
+	case errors.Is(err, domain.ErrInsufficientCoinsBalance):
+		return http.StatusBadRequest, "insufficient coins balance"
+	case errors.Is(err, domain.ErrInvalidSubscriptionDuration):
+		return http.StatusBadRequest, "subscription duration must be greater than 0"
+	case errors.Is(err, domain.ErrSubscriptionAlreadyActive):
+		return http.StatusBadRequest, "subscription already active"
+	case errors.Is(err, domain.ErrNoActiveSubscription):
+		return http.StatusBadRequest, "user does not have an active subscription"
+	case errors.Is(err, domain.ErrEmailTooLong):
+		return http.StatusBadRequest, "email is too long"
+	case errors.Is(err, domain.ErrNameTooLong):
+		return http.StatusBadRequest, "name is too long"
+	case errors.Is(err, domain.ErrInvalidUUID):
+		return http.StatusBadRequest, "invalid user ID format"
+	case errors.Is(err, domain.ErrCoinsAmountTooLarge):
+		return http.StatusBadRequest, "coins amount is too large"
+	case errors.Is(err, domain.ErrListLimitTooLarge):
+		return http.StatusBadRequest, "list limit is too large"
+	case errors.Is(err, domain.ErrListOffsetTooLarge):
+		return http.StatusBadRequest, "list offset is too large"
+	default:
+		return http.StatusInternalServerError, "internal server error"
+	}
+}
+
+func (s *server) HealthCheck(c echo.Context) error {
 	if err := s.db.Ping(); err != nil {
 		log.WithField("error", err).Error("Health check failed: database is down")
 		return c.JSON(http.StatusServiceUnavailable, map[string]string{
@@ -39,7 +98,7 @@ func (s *Server) HealthCheck(c echo.Context) error {
 	})
 }
 
-func (s *Server) CreateUser(c echo.Context) error {
+func (s *server) CreateUser(c echo.Context) error {
 	var req domain.CreateUserRequest
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, map[string]string{
@@ -51,15 +110,16 @@ func (s *Server) CreateUser(c echo.Context) error {
 	user, err := s.userService.CreateUser(ctx, req)
 	if err != nil {
 		log.WithError(err).Error("Failed to create user")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
+		statusCode, errorMsg := handleError(err)
+		return c.JSON(statusCode, map[string]string{
+			"error": errorMsg,
 		})
 	}
 
 	return c.JSON(http.StatusCreated, user)
 }
 
-func (s *Server) GetUser(c echo.Context) error {
+func (s *server) GetUser(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{
@@ -70,14 +130,10 @@ func (s *Server) GetUser(c echo.Context) error {
 	ctx := c.Request().Context()
 	user, err := s.userService.GetUser(ctx, id)
 	if err != nil {
-		if errors.Is(err, domain.ErrUserNotFound) {
-			return c.JSON(http.StatusNotFound, map[string]string{
-				"error": "user not found",
-			})
-		}
 		log.WithError(err).WithField("user_id", id).Error("Failed to get user")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "internal server error",
+		statusCode, errorMsg := handleError(err)
+		return c.JSON(statusCode, map[string]string{
+			"error": errorMsg,
 		})
 	}
 
@@ -102,7 +158,7 @@ func (s *Server) GetUser(c echo.Context) error {
 	return c.JSON(http.StatusOK, response)
 }
 
-func (s *Server) GetUserByEmail(c echo.Context) error {
+func (s *server) GetUserByEmail(c echo.Context) error {
 	email := c.Param("email")
 	if email == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{
@@ -113,14 +169,10 @@ func (s *Server) GetUserByEmail(c echo.Context) error {
 	ctx := c.Request().Context()
 	user, err := s.userService.GetUserByEmail(ctx, email)
 	if err != nil {
-		if errors.Is(err, domain.ErrUserNotFound) {
-			return c.JSON(http.StatusNotFound, map[string]string{
-				"error": "user not found",
-			})
-		}
 		log.WithError(err).WithField("email", email).Error("Failed to get user by email")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "internal server error",
+		statusCode, errorMsg := handleError(err)
+		return c.JSON(statusCode, map[string]string{
+			"error": errorMsg,
 		})
 	}
 
@@ -145,7 +197,7 @@ func (s *Server) GetUserByEmail(c echo.Context) error {
 	return c.JSON(http.StatusOK, response)
 }
 
-func (s *Server) UpdateUser(c echo.Context) error {
+func (s *server) UpdateUser(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{
@@ -163,21 +215,17 @@ func (s *Server) UpdateUser(c echo.Context) error {
 	ctx := c.Request().Context()
 	user, err := s.userService.UpdateUser(ctx, id, req)
 	if err != nil {
-		if errors.Is(err, domain.ErrUserNotFound) {
-			return c.JSON(http.StatusNotFound, map[string]string{
-				"error": "user not found",
-			})
-		}
 		log.WithError(err).WithField("user_id", id).Error("Failed to update user")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "internal server error",
+		statusCode, errorMsg := handleError(err)
+		return c.JSON(statusCode, map[string]string{
+			"error": errorMsg,
 		})
 	}
 
 	return c.JSON(http.StatusOK, user)
 }
 
-func (s *Server) DeleteUser(c echo.Context) error {
+func (s *server) DeleteUser(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{
@@ -187,25 +235,21 @@ func (s *Server) DeleteUser(c echo.Context) error {
 
 	ctx := c.Request().Context()
 	if err := s.userService.DeleteUser(ctx, id); err != nil {
-		if errors.Is(err, domain.ErrUserNotFound) {
-			return c.JSON(http.StatusNotFound, map[string]string{
-				"error": "user not found",
-			})
-		}
 		log.WithError(err).WithField("user_id", id).Error("Failed to delete user")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "internal server error",
+		statusCode, errorMsg := handleError(err)
+		return c.JSON(statusCode, map[string]string{
+			"error": errorMsg,
 		})
 	}
 
 	return c.JSON(http.StatusNoContent, nil)
 }
 
-func (s *Server) ListUsers(c echo.Context) error {
+func (s *server) ListUsers(c echo.Context) error {
 	limitStr := c.QueryParam("limit")
 	offsetStr := c.QueryParam("offset")
 
-	limit := 10 
+	limit := 10
 	offset := 0
 
 	if limitStr != "" {
@@ -223,8 +267,9 @@ func (s *Server) ListUsers(c echo.Context) error {
 	users, err := s.userService.ListUsers(ctx, limit, offset)
 	if err != nil {
 		log.WithError(err).Error("Failed to list users")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": err.Error(),
+		statusCode, errorMsg := handleError(err)
+		return c.JSON(statusCode, map[string]string{
+			"error": errorMsg,
 		})
 	}
 
@@ -241,7 +286,7 @@ type SubscriptionRequest struct {
 	DurationHours int `json:"duration_hours"`
 }
 
-func (s *Server) AddCoins(c echo.Context) error {
+func (s *server) AddCoins(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{
@@ -258,14 +303,10 @@ func (s *Server) AddCoins(c echo.Context) error {
 
 	ctx := c.Request().Context()
 	if err := s.userService.AddCoins(ctx, id, req.Coins); err != nil {
-		if errors.Is(err, domain.ErrUserNotFound) {
-			return c.JSON(http.StatusNotFound, map[string]string{
-				"error": "user not found",
-			})
-		}
 		log.WithError(err).WithField("user_id", id).Error("Failed to add coins")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "internal server error",
+		statusCode, errorMsg := handleError(err)
+		return c.JSON(statusCode, map[string]string{
+			"error": errorMsg,
 		})
 	}
 
@@ -274,7 +315,7 @@ func (s *Server) AddCoins(c echo.Context) error {
 	})
 }
 
-func (s *Server) DeductCoins(c echo.Context) error {
+func (s *server) DeductCoins(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{
@@ -297,19 +338,10 @@ func (s *Server) DeductCoins(c echo.Context) error {
 
 	ctx := c.Request().Context()
 	if err := s.userService.DeductCoins(ctx, id, req.Coins); err != nil {
-		if errors.Is(err, domain.ErrUserNotFound) {
-			return c.JSON(http.StatusNotFound, map[string]string{
-				"error": "user not found",
-			})
-		}
-		if err.Error() == "insufficient coins balance" || err.Error() == "failed to deduct coins: coins balance cannot be negative" {
-			return c.JSON(http.StatusBadRequest, map[string]string{
-				"error": err.Error(),
-			})
-		}
 		log.WithError(err).WithField("user_id", id).Error("Failed to deduct coins")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "internal server error",
+		statusCode, errorMsg := handleError(err)
+		return c.JSON(statusCode, map[string]string{
+			"error": errorMsg,
 		})
 	}
 
@@ -318,7 +350,7 @@ func (s *Server) DeductCoins(c echo.Context) error {
 	})
 }
 
-func (s *Server) ActivateSubscription(c echo.Context) error {
+func (s *server) ActivateSubscription(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{
@@ -343,14 +375,10 @@ func (s *Server) ActivateSubscription(c echo.Context) error {
 
 	ctx := c.Request().Context()
 	if err := s.userService.ActivateSubscription(ctx, id, duration); err != nil {
-		if errors.Is(err, domain.ErrUserNotFound) {
-			return c.JSON(http.StatusNotFound, map[string]string{
-				"error": "user not found",
-			})
-		}
 		log.WithError(err).WithField("user_id", id).Error("Failed to activate subscription")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "internal server error",
+		statusCode, errorMsg := handleError(err)
+		return c.JSON(statusCode, map[string]string{
+			"error": errorMsg,
 		})
 	}
 
@@ -359,7 +387,7 @@ func (s *Server) ActivateSubscription(c echo.Context) error {
 	})
 }
 
-func (s *Server) RenewSubscription(c echo.Context) error {
+func (s *server) RenewSubscription(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{
@@ -384,19 +412,10 @@ func (s *Server) RenewSubscription(c echo.Context) error {
 
 	ctx := c.Request().Context()
 	if err := s.userService.RenewSubscription(ctx, id, duration); err != nil {
-		if errors.Is(err, domain.ErrUserNotFound) {
-			return c.JSON(http.StatusNotFound, map[string]string{
-				"error": "user not found",
-			})
-		}
-		if err.Error() == "user does not have an active subscription" {
-			return c.JSON(http.StatusBadRequest, map[string]string{
-				"error": "user does not have an active subscription",
-			})
-		}
 		log.WithError(err).WithField("user_id", id).Error("Failed to renew subscription")
-		return c.JSON(http.StatusInternalServerError, map[string]string{
-			"error": "internal server error",
+		statusCode, errorMsg := handleError(err)
+		return c.JSON(statusCode, map[string]string{
+			"error": errorMsg,
 		})
 	}
 
@@ -405,7 +424,7 @@ func (s *Server) RenewSubscription(c echo.Context) error {
 	})
 }
 
-func (s *Server) HasAccess(c echo.Context) error {
+func (s *server) HasAccess(c echo.Context) error {
 	id := c.Param("id")
 	if id == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{
