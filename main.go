@@ -19,7 +19,6 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
 )
 
 func main() {
@@ -30,7 +29,7 @@ func main() {
 	log.SetOutput(os.Stdout)
 	log.SetLevel(log.DebugLevel)
 
-	if err := godotenv.Load(); err != nil {
+	if err := godotenv.Load("../.env"); err != nil {
 		log.Warn("Could not load .env file.")
 	}
 
@@ -70,11 +69,20 @@ func main() {
 	// Create server
 	srv := server.NewServer(userService, db)
 
+	// Create product repositories
+	categoryRepository := repository.NewPostgresProductCategoryRepository(db)
+	productRepository := repository.NewPostgresProductRepository(db)
+
+	// Create product services
+	categoryService := service.NewProductCategoryService(categoryRepository)
+	productService := service.NewProductService(productRepository)
+
+	// Create product servers
+	categoryServer := server.NewProductCategoryServer(categoryService)
+	productServer := server.NewProductServer(productService)
+
 	// Setup Echo
 	e := echo.New()
-
-	// Add BodyLimit middleware to prevent large request bodies (1 MB)
-	e.Use(middleware.BodyLimit("1M"))
 
 	// Health check
 	e.GET("/health", srv.HealthCheck)
@@ -95,6 +103,27 @@ func main() {
 	users.POST("/:id/subscription/activate", srv.ActivateSubscription)
 	users.POST("/:id/subscription/renew", srv.RenewSubscription)
 	users.GET("/:id/access", srv.HasAccess)
+
+	// Catalog endpoints
+	catalog := api.Group("/catalog")
+
+	// Categories
+	categories := catalog.Group("/categories")
+	categories.GET("", categoryServer.ListCategories)
+	categories.GET("/:id", categoryServer.GetCategoryByID)
+	categories.GET("/slug/:slug", categoryServer.GetCategoryBySlug)
+	categories.POST("", categoryServer.CreateCategory)
+	categories.PUT("/:id", categoryServer.UpdateCategory)
+	categories.DELETE("/:id", categoryServer.DeleteCategory)
+
+	// Products
+	products := catalog.Group("/products")
+	products.GET("", productServer.ListProducts)
+	products.GET("/:id", productServer.GetProductByID)
+	products.GET("/slug/:slug", productServer.GetProductBySlug)
+	products.POST("", productServer.CreateProduct)
+	products.PUT("/:id", productServer.UpdateProduct)
+	products.DELETE("/:id", productServer.DeleteProduct)
 
 	port := os.Getenv("PORT")
 	if port == "" {
