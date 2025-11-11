@@ -1,10 +1,16 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
+	"user-service/internal/config"
+	"user-service/internal/publisher"
 	"user-service/internal/repository"
 	"user-service/internal/server"
 	"user-service/internal/service"
@@ -27,16 +33,29 @@ func main() {
 	})
 
 	log.SetOutput(os.Stdout)
-	log.SetLevel(log.DebugLevel)
+
+	levelStr := os.Getenv("LOG_LEVEL")
+	if levelStr == "" {
+		levelStr = "info"
+	}
+
+	level, err := log.ParseLevel(levelStr)
+	if err != nil {
+		log.Warnf("Invalid LOG_LEVEL '%s', using InfoLevel", levelStr)
+		level = log.InfoLevel
+	}
+
+	log.SetLevel(level)
+	log.WithField("level", level.String()).Info("Logger initialized")
 
 	if err := godotenv.Load("../.env"); err != nil {
 		log.Warn("Could not load .env file.")
 	}
-
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		log.Fatal("FATAL: DATABASE_URL environment variable is not set")
+	cfg, err := config.Load()
+	if err != nil {
+		log.WithField("error", err).Fatal("Could not load configuration")
 	}
+	dbURL := cfg.DB.URL
 
 	log.Info("Starting database migration...")
 	m, err := migrate.New("file://db/migrations", dbURL)
@@ -53,18 +72,43 @@ func main() {
 	if err != nil {
 		log.WithField("error", err).Fatal("Could not connect to the database")
 	}
-	defer db.Close()
+	db.SetMaxOpenConns(cfg.DB.MaxOpenConns)
+	db.SetMaxIdleConns(cfg.DB.MaxIdleConns)
+	db.SetConnMaxLifetime(cfg.DB.ConnMaxLifetime)
+	db.SetConnMaxIdleTime(cfg.DB.ConnMaxIdleTime)
 
-	if err := db.Ping(); err != nil {
+	pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer pingCancel()
+	if err := db.PingContext(pingCtx); err != nil {
 		log.WithField("error", err).Fatal("Could not ping the database")
 	}
+
 	log.Info("Successfully connected to the PostgreSQL database.")
 
 	// Create repository
 	userRepository := repository.NewPostgresUserRepository(db)
 
+	// Create audit publisher
+	kafkaBootstrap := os.Getenv("KAFKA_BOOTSTRAP_SERVERS")
+	if kafkaBootstrap == "" {
+		log.Fatal("FATAL: KAFKA_BOOTSTRAP_SERVERS environment variable is not set")
+	}
+
+	auditTopic := os.Getenv("KAFKA_AUDIT_TOPIC")
+	if auditTopic == "" {
+		auditTopic = "audit_events"
+	}
+
+	auditPublisher, err := publisher.NewAuditPublisher(kafkaBootstrap, auditTopic)
+	if err != nil {
+		log.WithField("error", err).Fatal("Could not create audit Kafka publisher")
+	}
+	defer auditPublisher.Close()
+
+	auditService := service.NewAuditService(auditPublisher)
+
 	// Create service
-	userService := service.NewUserService(userRepository)
+	userService := service.NewUserService(userRepository, auditService)
 
 	// Create server
 	srv := server.NewServer(userService, db)
@@ -132,7 +176,33 @@ func main() {
 
 	log.WithField("port", port).Info("User service is starting with Echo")
 
-	if err := e.Start(":" + port); err != nil && err != http.ErrServerClosed {
-		log.WithField("error", err).Fatal("Echo server failed to start")
+	// Start server in goroutine
+	go func() {
+		if err := e.Start(":" + port); err != nil && err != http.ErrServerClosed {
+			log.WithField("error", err).Fatal("Echo server failed to start")
+		}
+	}()
+
+	// Setup graceful shutdown
+	sigchan := make(chan os.Signal, 1)
+	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
+	log.Info("User service started. Press Ctrl+C to stop.")
+
+	// Wait for shutdown signal
+	<-sigchan
+	log.Info("Shutting down user service...")
+
+	// Graceful shutdown with timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+	if err := e.Shutdown(shutdownCtx); err != nil {
+		log.WithField("error", err).Error("Error shutting down server")
 	}
+
+	// Close resources explicitly
+	if err := db.Close(); err != nil {
+		log.WithError(err).Error("Error closing database")
+	}
+
+	log.Info("User service stopped")
 }

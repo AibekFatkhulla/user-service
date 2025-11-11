@@ -28,10 +28,14 @@ type UserRepository interface {
 
 type userService struct {
 	userRepository UserRepository
+	auditService   *AuditService
 }
 
-func NewUserService(userRepository UserRepository) *userService {
-	return &userService{userRepository: userRepository}
+func NewUserService(userRepository UserRepository, auditService *AuditService) *userService {
+	return &userService{
+		userRepository: userRepository,
+		auditService:   auditService,
+	}
 }
 
 // ValidateStatus validates user status
@@ -96,6 +100,10 @@ func (s *userService) CreateUser(ctx context.Context, req domain.CreateUserReque
 		"email":   user.Email,
 	}).Info("User successfully created")
 
+	if err := s.auditService.RecordUserCreated(ctx, user); err != nil {
+		log.WithError(err).WithField("user_id", user.ID).Warn("Failed to record audit event for user creation")
+	}
+
 	return user, nil
 }
 
@@ -144,6 +152,7 @@ func (s *userService) UpdateUser(ctx context.Context, id string, req domain.Upda
 	// Build update fields structure - only include changed fields
 	updateFields := &domain.UpdateUserFields{}
 
+	changes := map[string]interface{}{}
 	// Validate and prepare email update
 	if req.Email != "" && req.Email != user.Email {
 		if len(req.Email) > domain.MaxEmailLength {
@@ -158,6 +167,7 @@ func (s *userService) UpdateUser(ctx context.Context, id string, req domain.Upda
 			return nil, domain.ErrEmailAlreadyExists
 		}
 		updateFields.Email = &req.Email
+		changes["email"] = req.Email
 		user.Email = req.Email
 	}
 
@@ -167,6 +177,7 @@ func (s *userService) UpdateUser(ctx context.Context, id string, req domain.Upda
 			return nil, domain.ErrNameTooLong
 		}
 		updateFields.Name = &req.Name
+		changes["name"] = req.Name
 		user.Name = req.Name
 	}
 
@@ -176,6 +187,7 @@ func (s *userService) UpdateUser(ctx context.Context, id string, req domain.Upda
 			return nil, err
 		}
 		updateFields.Status = req.Status
+		changes["status"] = *req.Status
 		user.Status = *req.Status
 	}
 
@@ -192,6 +204,12 @@ func (s *userService) UpdateUser(ctx context.Context, id string, req domain.Upda
 	}
 
 	log.WithField("user_id", id).Info("User successfully updated")
+
+	if len(changes) > 0 {
+		if err := s.auditService.RecordUserUpdated(ctx, id, changes); err != nil {
+			log.WithError(err).WithField("user_id", id).Warn("Failed to record audit event for user update")
+		}
+	}
 	return user, nil
 }
 
@@ -261,6 +279,10 @@ func (s *userService) AddCoins(ctx context.Context, userID string, coins int64) 
 		"coins_added": coins,
 	}).Info("Coins successfully added to user")
 
+	if err := s.auditService.RecordCoinsAdded(ctx, userID, coins); err != nil {
+		log.WithError(err).WithField("user_id", userID).Warn("Failed to record audit event for coins added")
+	}
+
 	return nil
 }
 
@@ -290,6 +312,10 @@ func (s *userService) DeductCoins(ctx context.Context, userID string, coins int6
 		"user_id":        userID,
 		"coins_deducted": coins,
 	}).Info("Coins successfully deducted from user")
+
+	if err := s.auditService.RecordCoinsDeducted(ctx, userID, coins); err != nil {
+		log.WithError(err).WithField("user_id", userID).Warn("Failed to record audit event for coins deducted")
+	}
 
 	return nil
 }
@@ -337,6 +363,10 @@ func (s *userService) ActivateSubscription(ctx context.Context, userID string, d
 		"subscription_ends_at": subscriptionEndsAt,
 	}).Info("Subscription successfully activated")
 
+	if err := s.auditService.RecordSubscriptionEvent(ctx, userID, "user_subscription_activated", duration, subscriptionEndsAt); err != nil {
+		log.WithError(err).WithField("user_id", userID).Warn("Failed to record audit event for subscription activation")
+	}
+
 	return nil
 }
 
@@ -383,6 +413,10 @@ func (s *userService) RenewSubscription(ctx context.Context, userID string, dura
 		"coins_added":          5000,
 		"subscription_ends_at": newEndsAt,
 	}).Info("Subscription successfully renewed")
+
+	if err := s.auditService.RecordSubscriptionEvent(ctx, userID, "user_subscription_renewed", duration, newEndsAt); err != nil {
+		log.WithError(err).WithField("user_id", userID).Warn("Failed to record audit event for subscription renewal")
+	}
 
 	return nil
 }
